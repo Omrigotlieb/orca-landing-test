@@ -1,8 +1,31 @@
+import Navbar from "./components/Navbar";
+import Hero from "./components/Hero";
+import Features from "./components/Features";
+import Pipeline from "./components/Pipeline";
+import Metrics from "./components/Metrics";
+import Architecture from "./components/Architecture";
+import CTA from "./components/CTA";
+import Footer from "./components/Footer";
+
 export default function Home() {
   return (
-    <main>
-      <h1>ORCA Landing Page</h1>
-      <p>This page will be built by the ORCA pipeline.</p>
-    </main>
+    <>
+      <Navbar />
+      <Hero />
+      <section id="features">
+        <Features />
+      </section>
+      <section id="pipeline">
+        <Pipeline />
+      </section>
+      <section id="metrics">
+        <Metrics />
+      </section>
+      <section id="architecture">
+        <Architecture />
+      </section>
+      <CTA />
+      <Footer />
+    </>
   );
 }
