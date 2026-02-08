@@ -1,0 +1,137 @@
+name: Preview Deployment
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+
+permissions:
+  contents: read
+  pull-requests: write
+  deployments: write
+
+jobs:
+  deploy-preview:
+    name: Deploy Preview
+    runs-on: ubuntu-latest
+    if: github.event.action != 'closed'
+    continue-on-error: true
+    outputs:
+      preview_url: ${{ steps.extract-url.outputs.preview_url }}
+      app_id: ${{ steps.extract-url.outputs.app_id }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy Preview App
+        id: deploy
+        uses: digitalocean/app_action/deploy@v2
+        with:
+          token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+          deploy_pr_preview: "true"
+
+      - name: Extract Preview URL
+        id: extract-url
+        env:
+          APP_JSON: ${{ steps.deploy.outputs.app }}
+        run: |
+          PREVIEW_URL=$(echo "$APP_JSON" | jq -r '.live_url // empty')
+          APP_ID=$(echo "$APP_JSON" | jq -r '.id // empty')
+          echo "preview_url=${PREVIEW_URL}" >> $GITHUB_OUTPUT
+          echo "app_id=${APP_ID}" >> $GITHUB_OUTPUT
+
+      - name: Wait for preview
+        env:
+          PREVIEW_URL: ${{ steps.extract-url.outputs.preview_url }}
+        run: |
+          for i in {1..30}; do
+            HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" "$PREVIEW_URL" 2>/dev/null || echo "000")
+            if [ "$HTTP_STATUS" == "200" ]; then
+              echo "Preview ready!"
+              exit 0
+            fi
+            echo "Waiting... (attempt $i/30, status: $HTTP_STATUS)"
+            sleep 10
+          done
+          echo "Warning: Preview may not be fully ready"
+
+  e2e-tests:
+    name: E2E Tests
+    runs-on: ubuntu-latest
+    needs: deploy-preview
+    if: needs.deploy-preview.outputs.preview_url != ''
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright
+        run: npx playwright install chromium --with-deps
+
+      - name: Run E2E tests
+        env:
+          PREVIEW_URL: ${{ needs.deploy-preview.outputs.preview_url }}
+        run: npx playwright test
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-results
+          path: test-results/
+          retention-days: 7
+
+  lighthouse-audit:
+    name: Lighthouse Audit
+    runs-on: ubuntu-latest
+    needs: deploy-preview
+    if: needs.deploy-preview.outputs.preview_url != ''
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run Lighthouse CI
+        uses: treosh/lighthouse-ci-action@v12
+        with:
+          urls: |
+            ${{ needs.deploy-preview.outputs.preview_url }}/
+          configPath: .lighthouserc.js
+          uploadArtifacts: true
+
+  cleanup-preview:
+    name: Cleanup Preview
+    runs-on: ubuntu-latest
+    if: github.event.action == 'closed'
+
+    steps:
+      - name: Install doctl
+        uses: digitalocean/action-doctl@v2
+        with:
+          token: ${{ secrets.DIGITALOCEAN_ACCESS_TOKEN }}
+
+      - name: Delete preview app
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          APP_NAME="orca-landing-test-pr-${PR_NUMBER}"
+          APP_ID=$(doctl apps list --format ID,Spec.Name --no-header 2>/dev/null | grep "$APP_NAME" | awk '{print $1}' || true)
+          if [ -n "$APP_ID" ]; then
+            doctl apps delete "$APP_ID" --force
+            echo "Deleted preview app: $APP_NAME"
+          else
+            echo "No preview app found for PR #${PR_NUMBER}"
+          fi
